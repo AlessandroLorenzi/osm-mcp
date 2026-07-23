@@ -62,6 +62,13 @@ When the element does not exist on OSM:
 1. Show the proposed tags and ask for confirmation
 2. Call `create_osm_node` with lat, lon, and tags
 
+## Creating a new way (area)
+
+For areas (parking lots, buildings, flower beds, ...) use `create_osm_way`:
+1. Show the vertices ([lat, lon] list) and the proposed tags, then ask for confirmation
+2. Call `create_osm_way` with the ordered vertex list and tags (do not repeat the
+   first vertex at the end: the ring is closed automatically when `closed=True`)
+
 ## opening_hours format
 
 ```
@@ -77,7 +84,8 @@ Mo-Su 00:00-24:00
 
 ## Quality rules
 
-- Only modify descriptive tags — never `building`, geometries, or relations
+- You may create new geometries (nodes and simple closed ways/areas). Never modify
+  the geometry of **existing** elements, and never touch relations
 - Use standard tags from the OSM wiki
 - Do not add `source=*` unless the user asks
 - For complex `opening_hours`, suggest validating at https://openingh.openstreetmap.de
@@ -180,6 +188,44 @@ def _build_element_xml(element: dict, new_tags: dict, changeset_id: int) -> str:
         tag.set("v", v)
 
     return '<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="unicode")
+
+
+def _build_osmchange_xml(
+    coords: list, tags: dict, changeset_id: int, closed: bool
+) -> str:
+    root = ET.Element("osmChange")
+    root.set("version", "0.6")
+    root.set("generator", CREATED_BY)
+    create = ET.SubElement(root, "create")
+
+    for i, (lat, lon) in enumerate(coords, start=1):
+        node = ET.SubElement(create, "node")
+        node.set("id", str(-i))
+        node.set("lat", str(lat))
+        node.set("lon", str(lon))
+        node.set("changeset", str(changeset_id))
+
+    way = ET.SubElement(create, "way")
+    way.set("id", str(-(len(coords) + 1)))
+    way.set("changeset", str(changeset_id))
+    refs = list(range(-1, -(len(coords) + 1), -1))
+    if closed:
+        refs.append(-1)
+    for ref in refs:
+        ET.SubElement(way, "nd").set("ref", str(ref))
+    for k, v in tags.items():
+        t = ET.SubElement(way, "tag")
+        t.set("k", k)
+        t.set("v", v)
+
+    return '<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="unicode")
+
+
+def _parse_diff_result(xml_text: str) -> dict:
+    mapping: dict = {}
+    for el in ET.fromstring(xml_text):
+        mapping.setdefault(el.tag, {})[int(el.get("old_id"))] = int(el.get("new_id"))
+    return mapping
 
 
 # ---------------------------------------------------------------------------
@@ -419,5 +465,69 @@ def create_osm_node(
     )
 
 
+@mcp.tool()
+def create_osm_way(
+    coords: list[list[float]],
+    tags: dict[str, str],
+    closed: bool = True,
+    changeset_comment: str = "",
+    dry_run: bool = False,
+    ctx: Context = None,
+) -> str:
+    """Create a new OSM way (polygon/area if closed) with its nodes in one atomic upload.
+
+    Show the user the vertices and tags and get explicit confirmation BEFORE calling this tool.
+
+    Args:
+        coords: Ordered list of [lat, lon] vertices. Do NOT repeat the first
+            vertex at the end: closing the ring is handled automatically.
+        tags: Tags for the way, e.g. {"amenity": "parking", "parking": "surface"}
+        closed: If True (default), create a closed way (area/polygon)
+        changeset_comment: Short description of the change
+        dry_run: If True, return a preview and the osmChange XML without uploading
+    """
+    vertices = [(float(lat), float(lon)) for lat, lon in coords]
+    if closed and len(vertices) >= 2 and vertices[0] == vertices[-1]:
+        vertices = vertices[:-1]
+
+    if closed and len(set(vertices)) < 3:
+        raise ValueError("A closed way needs at least 3 distinct vertices")
+    if not closed and len(vertices) < 2:
+        raise ValueError("An open way needs at least 2 vertices")
+
+    tag_lines = "\n".join(f"  {k} = {v}" for k, v in tags.items())
+    kind = "closed way (area)" if closed else "open way"
+    preview = f"New {kind} with {len(vertices)} vertices\nTags:\n{tag_lines}"
+
+    if dry_run:
+        xml = _build_osmchange_xml(vertices, tags, changeset_id=0, closed=closed)
+        return f"DRY RUN — no upload.\n\n{preview}\n\nXML:\n{xml}"
+
+    headers = _auth_headers(_token_from_context(ctx) if ctx else None)
+    comment = changeset_comment or f"Add way via {CREATED_BY}"
+    changeset_id = _create_changeset(comment, headers)
+
+    try:
+        xml_body = _build_osmchange_xml(vertices, tags, changeset_id, closed)
+        req = Request(
+            f"{API_URL}/api/0.6/changeset/{changeset_id}/upload",
+            data=xml_body.encode(),
+            headers={**headers, "Content-Type": "text/xml"},
+            method="POST",
+        )
+        with urlopen(req) as r:
+            diff_result = r.read().decode()
+        way_id = _parse_diff_result(diff_result)["way"][-(len(vertices) + 1)]
+    finally:
+        _close_changeset(changeset_id, headers)
+
+    osm_url = f"https://www.openstreetmap.org/way/{way_id}"
+    return (
+        f"Created way/{way_id} (changeset #{changeset_id})\n\n"
+        f"{preview}\n\n"
+        f"{osm_url}"
+    )
+
+
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(show_banner=False)
