@@ -2,10 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY pyproject.toml .
-COPY server.py .
+COPY pyproject.toml server.py ./
 
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir . \
+    && useradd --system --uid 10001 --no-create-home mcp
+
+USER mcp
 
 EXPOSE 8000
 

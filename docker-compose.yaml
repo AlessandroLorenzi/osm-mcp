@@ -1,0 +1,8 @@
+# Sviluppo locale. Il deploy su home sta in home-ansible (files/osm-mcp).
+services:
+  osm-mcp:
+    build: .
+    image: osm-mcp:latest
+    ports:
+      - 127.0.0.1:8000:8000
+    restart: unless-stopped
