@@ -5,7 +5,7 @@ Update OpenStreetMap tags from images or text using an MCP server and Claude.
 ## Requirements
 
 - Python 3.11+
-- [fastmcp](https://github.com/jlowin/fastmcp) (`pip install fastmcp`)
+- [uv](https://docs.astral.sh/uv/)
 - Account on [openstreetmap.org](https://www.openstreetmap.org)
 
 ## Setup
@@ -13,7 +13,7 @@ Update OpenStreetMap tags from images or text using an MCP server and Claude.
 ### 1. Install dependencies
 
 ```bash
-pip install fastmcp
+uv sync
 ```
 
 ### 2. Get an OSM token
@@ -31,7 +31,7 @@ OAuth 2 Applications → Register new application**:
 Then generate the token:
 
 ```bash
-python app/osm_auth.py <CLIENT-ID>
+uv run app/osm_auth.py <CLIENT-ID>
 ```
 
 The script opens your browser, asks you to authorize, then prints the token.
@@ -55,9 +55,8 @@ a Prefect account for the OAuth login that Claude Code will prompt.
 **Option B — local:**
 
 ```bash
-pip install fastmcp
 claude mcp add osm -e OSM_TOKEN=<your-osm-token> -- \
-  python /path/to/osm-mcp/server.py
+  uv run --directory /path/to/osm-mcp server.py
 ```
 
 ## Available tools
