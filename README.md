@@ -46,7 +46,7 @@ export OSM_TOKEN="<token>"
 
 ```bash
 claude mcp add --transport http osm https://osm-mcp.fastmcp.app/mcp \
-  --header "X-OSM-Token: <your-osm-token>"
+  --header "X-API-Key: <your-osm-token>"
 ```
 
 The hosted server runs on [Prefect](https://horizon.prefect.io) and requires

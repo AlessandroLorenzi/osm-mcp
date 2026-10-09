@@ -103,11 +103,18 @@ CREATED_BY = "https://github.com/AlessandroLorenzi/osm-mcp"
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+# X-API-Key is one of the header names claude.ai connectors accept; X-OSM-Token
+# stays for clients configured before the switch.
+TOKEN_HEADERS = ("x-api-key", "x-osm-token")
+
+
 def _token_from_context(ctx: Context) -> str | None:
     try:
-        osm_token = ctx.request_context.request.headers.get("x-osm-token", "")
-        if osm_token:
-            return osm_token
+        headers = ctx.request_context.request.headers
+        for name in TOKEN_HEADERS:
+            osm_token = headers.get(name, "")
+            if osm_token:
+                return osm_token
     except (AttributeError, TypeError):
         pass
     return None
@@ -123,7 +130,7 @@ def _auth_headers(token: str | None = None) -> dict:
         import base64
         creds = base64.b64encode(f"{user}:{pwd}".encode()).decode()
         return {"Authorization": f"Basic {creds}"}
-    raise RuntimeError("Provide OSM_TOKEN via Authorization header or OSM_TOKEN env var")
+    raise RuntimeError("Provide the OSM token via X-API-Key header or OSM_TOKEN env var")
 
 
 def _fetch_element(elem_type: str, elem_id: int) -> dict:
