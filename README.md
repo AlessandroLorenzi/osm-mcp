@@ -68,6 +68,7 @@ claude mcp add osm -e OSM_TOKEN=<your-osm-token> -- \
 | `update_osm_tags` | Apply tag changes (nodes, ways, relations) |
 | `create_osm_node` | Create a new node at given coordinates |
 | `create_osm_way` | Create a new way/area with its nodes in one atomic upload |
+| `delete_osm_node` | Delete a standalone node (refused if part of a way or relation) |
 | `update_osm_relation_members` | Add, remove or change the role of relation members |
 | `create_osm_relation` | Create a new relation from existing elements |
 | `get_today_date` | Return today's date in ISO format |

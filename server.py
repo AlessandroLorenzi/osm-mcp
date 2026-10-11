@@ -71,6 +71,17 @@ For areas (parking lots, buildings, flower beds, ...) use `create_osm_way`:
 2. Call `create_osm_way` with the ordered vertex list and tags (do not repeat the
    first vertex at the end: the ring is closed automatically when `closed=True`)
 
+## Deleting a node
+
+For standalone nodes that no longer exist on the ground (e.g. a shop closed for good)
+use `delete_osm_node`:
+1. Call `get_osm_element` and show the node to the user
+2. Call `delete_osm_node` with `dry_run=True`, then ask for explicit confirmation
+3. Call it again without `dry_run`, with a `changeset_comment` explaining why
+
+If the place was just replaced by another business, prefer updating the tags.
+Nodes that are part of a way or relation are refused.
+
 ## Editing relations
 
 Relation tags are changed with `update_osm_tags` like any other element.
@@ -103,8 +114,8 @@ Mo-Su 00:00-24:00
 
 ## Quality rules
 
-- You may create new geometries (nodes and simple closed ways/areas). Never modify
-  the geometry of **existing** nodes and ways
+- You may create new geometries (nodes and simple closed ways/areas) and delete
+  standalone nodes. Never modify the geometry of **existing** nodes and ways
 - Relations may be created and their tags/members edited, always after showing the
   diff and getting confirmation. Use the roles documented on the OSM wiki for the
   relation `type` (e.g. `outer`/`inner` for multipolygon)
@@ -159,6 +170,16 @@ def _fetch_element(elem_type: str, elem_id: int) -> dict:
     url = f"{API_URL}/api/0.6/{elem_type}/{elem_id}.json"
     with urlopen(url) as r:
         return json.loads(r.read())["elements"][0]
+
+
+def _fetch_parents(elem_type: str, elem_id: int) -> list[dict]:
+    """Ways and relations that reference the element (ways only exist for nodes)."""
+    parents = []
+    kinds = ("ways", "relations") if elem_type == "node" else ("relations",)
+    for kind in kinds:
+        with urlopen(f"{API_URL}/api/0.6/{elem_type}/{elem_id}/{kind}.json") as r:
+            parents += json.loads(r.read())["elements"]
+    return parents
 
 
 def _create_changeset(comment: str, headers: dict) -> int:
@@ -289,6 +310,17 @@ def _build_element_xml(
         tag.set("k", k)
         tag.set("v", v)
 
+    return '<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="unicode")
+
+
+def _build_delete_node_xml(node: dict, changeset_id: int) -> str:
+    root = ET.Element("osm")
+    el = ET.SubElement(root, "node")
+    el.set("id", str(node["id"]))
+    el.set("version", str(node["version"]))
+    el.set("changeset", str(changeset_id))
+    el.set("lat", str(node["lat"]))
+    el.set("lon", str(node["lon"]))
     return '<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="unicode")
 
 
@@ -649,6 +681,64 @@ def create_osm_way(
     osm_url = f"https://www.openstreetmap.org/way/{way_id}"
     return (
         f"Created way/{way_id} (changeset #{changeset_id})\n\n"
+        f"{preview}\n\n"
+        f"{osm_url}"
+    )
+
+
+@mcp.tool()
+def delete_osm_node(
+    node_id: int,
+    changeset_comment: str = "",
+    dry_run: bool = False,
+    ctx: Context = None,
+) -> str:
+    """Delete a standalone OSM node (e.g. a POI of a shop that closed for good).
+
+    Nodes that are part of a way or a relation are refused: deleting them would
+    change existing geometry. Show the user the node (dry_run=True) and get explicit
+    confirmation BEFORE uploading.
+
+    Args:
+        node_id: Numeric OSM node ID
+        changeset_comment: Short description of the change, e.g. why the node is removed
+        dry_run: If True, return what would be deleted without uploading
+    """
+    node = _fetch_element("node", node_id)
+    parents = _fetch_parents("node", node_id)
+    if parents:
+        refs = ", ".join(f"{p['type']}/{p['id']}" for p in parents)
+        raise ValueError(f"node/{node_id} is used by {refs}: refusing to delete it")
+
+    tag_lines = "\n".join(f"  {k} = {v}" for k, v in sorted(node.get("tags", {}).items()))
+    preview = (
+        f"Delete node/{node_id} (v{node['version']}) at lat={node['lat']}, lon={node['lon']}\n"
+        f"Tags:\n{tag_lines}"
+    )
+
+    if dry_run:
+        return f"DRY RUN — no upload.\n\n{preview}"
+
+    headers = _auth_headers(_token_from_context(ctx) if ctx else None)
+    comment = changeset_comment or f"Delete node via {CREATED_BY}"
+    changeset_id = _create_changeset(comment, headers)
+
+    try:
+        xml_body = _build_delete_node_xml(node, changeset_id)
+        req = Request(
+            f"{API_URL}/api/0.6/node/{node_id}",
+            data=xml_body.encode(),
+            headers={**headers, "Content-Type": "text/xml"},
+            method="DELETE",
+        )
+        with urlopen(req) as r:
+            new_version = int(r.read().strip())
+    finally:
+        _close_changeset(changeset_id, headers)
+
+    osm_url = f"https://www.openstreetmap.org/node/{node_id}"
+    return (
+        f"Deleted node/{node_id} (version {new_version}, changeset #{changeset_id})\n\n"
         f"{preview}\n\n"
         f"{osm_url}"
     )
