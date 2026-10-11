@@ -64,9 +64,12 @@ claude mcp add osm -e OSM_TOKEN=<your-osm-token> -- \
 | Tool | Description |
 | ---- | ----------- |
 | `search_osm` | Search elements by name and city |
-| `get_osm_element` | Read current tags (no auth needed) |
-| `update_osm_tags` | Apply tag changes |
+| `get_osm_element` | Read current tags and relation members (no auth needed) |
+| `update_osm_tags` | Apply tag changes (nodes, ways, relations) |
 | `create_osm_node` | Create a new node at given coordinates |
+| `create_osm_way` | Create a new way/area with its nodes in one atomic upload |
+| `update_osm_relation_members` | Add, remove or change the role of relation members |
+| `create_osm_relation` | Create a new relation from existing elements |
 | `get_today_date` | Return today's date in ISO format |
 
 ## Usage

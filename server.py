@@ -6,9 +6,11 @@ import json
 import xml.etree.ElementTree as ET
 from datetime import date
 from urllib.request import urlopen, Request
+from typing import Literal
 from urllib.parse import urlencode
 
 from fastmcp import FastMCP, Context
+from pydantic import BaseModel
 
 mcp = FastMCP(
     "OSM Tools",
@@ -69,6 +71,23 @@ For areas (parking lots, buildings, flower beds, ...) use `create_osm_way`:
 2. Call `create_osm_way` with the ordered vertex list and tags (do not repeat the
    first vertex at the end: the ring is closed automatically when `closed=True`)
 
+## Editing relations
+
+Relation tags are changed with `update_osm_tags` like any other element.
+
+To change relation members use `update_osm_relation_members`:
+1. Call `get_osm_element` to see the current members (with their positions)
+2. Show the proposed member changes, call the tool with `dry_run=True` and show the diff
+3. After explicit confirmation, call it again without `dry_run`
+
+Operations are applied in this order: `remove`, then `set_roles`, then `add`
+(`position` in `add` refers to the list after removals).
+
+To create a relation (multipolygon, route, site, ...) use `create_osm_relation`:
+1. Make sure every member already exists (read it with `get_osm_element`)
+2. Show members, roles and tags (a `type=*` tag is required), then ask for confirmation
+3. Call `create_osm_relation`
+
 ## opening_hours format
 
 ```
@@ -85,7 +104,10 @@ Mo-Su 00:00-24:00
 ## Quality rules
 
 - You may create new geometries (nodes and simple closed ways/areas). Never modify
-  the geometry of **existing** elements, and never touch relations
+  the geometry of **existing** nodes and ways
+- Relations may be created and their tags/members edited, always after showing the
+  diff and getting confirmation. Use the roles documented on the OSM wiki for the
+  relation `type` (e.g. `outer`/`inner` for multipolygon)
 - Use standard tags from the OSM wiki
 - Do not add `source=*` unless the user asks
 - For complex `opening_hours`, suggest validating at https://openingh.openstreetmap.de
@@ -168,7 +190,80 @@ def _close_changeset(changeset_id: int, headers: dict):
         r.read()
 
 
-def _build_element_xml(element: dict, new_tags: dict, changeset_id: int) -> str:
+ElemType = Literal["node", "way", "relation"]
+
+
+class Member(BaseModel):
+    """A relation member."""
+
+    type: ElemType
+    ref: int
+    role: str = ""
+
+
+class MemberAdd(Member):
+    """A member to insert; position is 0-based, None appends at the end."""
+
+    position: int | None = None
+
+
+class MemberMatch(BaseModel):
+    """Selects existing members; role None matches any role."""
+
+    type: ElemType
+    ref: int
+    role: str | None = None
+
+
+def _fmt_member(m: dict) -> str:
+    return f"{m['type']}/{m['ref']} ({m.get('role', '')})"
+
+
+def _apply_member_ops(
+    members: list[dict],
+    remove: list[MemberMatch] | None = None,
+    set_roles: list[Member] | None = None,
+    add: list[MemberAdd] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Apply remove, set_roles, add (in this order). Returns new members and diff lines."""
+    new = [dict(m) for m in members]
+    changes: list[str] = []
+
+    for r in remove or []:
+        hits = [
+            m for m in new
+            if m["type"] == r.type and m["ref"] == r.ref
+            and (r.role is None or m.get("role", "") == r.role)
+        ]
+        if not hits:
+            raise ValueError(f"Member {r.type}/{r.ref} not found in relation")
+        new = [m for m in new if not any(m is h for h in hits)]
+        changes += [f"-   {_fmt_member(h)}" for h in hits]
+
+    for s in set_roles or []:
+        hits = [m for m in new if m["type"] == s.type and m["ref"] == s.ref]
+        if not hits:
+            raise ValueError(f"Member {s.type}/{s.ref} not found in relation")
+        for m in hits:
+            old_role = m.get("role", "")
+            if old_role != s.role:
+                m["role"] = s.role
+                changes.append(f"~   {s.type}/{s.ref} ({old_role} -> {s.role})")
+
+    for a in add or []:
+        pos = len(new) if a.position is None else a.position
+        if not 0 <= pos <= len(new):
+            raise ValueError(f"Invalid position {a.position} (relation has {len(new)} members)")
+        m = {"type": a.type, "ref": a.ref, "role": a.role}
+        new.insert(pos, m)
+        changes.append(f"+   {_fmt_member(m)} at position {pos}")
+
+    return new, changes
+
+
+def _build_element_xml(
+    element: dict, new_tags: dict, changeset_id: int, members: list[dict] | None = None
+) -> str:
     elem_type = element["type"]
     root = ET.Element("osm")
     el = ET.SubElement(root, elem_type)
@@ -183,7 +278,7 @@ def _build_element_xml(element: dict, new_tags: dict, changeset_id: int) -> str:
         for ref in element.get("nodes", []):
             ET.SubElement(el, "nd").set("ref", str(ref))
     elif elem_type == "relation":
-        for member in element.get("members", []):
+        for member in element.get("members", []) if members is None else members:
             m = ET.SubElement(el, "member")
             m.set("type", member["type"])
             m.set("ref", str(member["ref"]))
@@ -193,6 +288,23 @@ def _build_element_xml(element: dict, new_tags: dict, changeset_id: int) -> str:
         tag = ET.SubElement(el, "tag")
         tag.set("k", k)
         tag.set("v", v)
+
+    return '<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="unicode")
+
+
+def _build_new_relation_xml(members: list[Member], tags: dict, changeset_id: int) -> str:
+    root = ET.Element("osm")
+    rel = ET.SubElement(root, "relation")
+    rel.set("changeset", str(changeset_id))
+    for member in members:
+        m = ET.SubElement(rel, "member")
+        m.set("type", member.type)
+        m.set("ref", str(member.ref))
+        m.set("role", member.role)
+    for k, v in tags.items():
+        t = ET.SubElement(rel, "tag")
+        t.set("k", k)
+        t.set("v", v)
 
     return '<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="unicode")
 
@@ -301,7 +413,8 @@ def search_osm(
 
 @mcp.tool()
 def get_osm_element(elem_type: str, elem_id: int) -> str:
-    """Fetch and return the current tags of an OSM element. No authentication needed.
+    """Fetch and return the current tags (and members, for relations) of an OSM element.
+    No authentication needed.
 
     Args:
         elem_type: "node", "way", or "relation"
@@ -314,8 +427,13 @@ def get_osm_element(elem_type: str, elem_id: int) -> str:
         "",
         "Tags:",
     ]
-    for k, v in sorted(element["tags"].items()):
+    for k, v in sorted(element.get("tags", {}).items()):
         lines.append(f"  {k} = {v}")
+    if element["type"] == "relation":
+        members = element.get("members", [])
+        lines += ["", f"Members ({len(members)}):"]
+        for i, m in enumerate(members):
+            lines.append(f"  [{i}] {_fmt_member(m)}")
     return "\n".join(lines)
 
 
@@ -342,7 +460,7 @@ def update_osm_tags(
         dry_run: If True, compute and return the diff without uploading
     """
     element = _fetch_element(elem_type.lower(), elem_id)
-    old_tags = dict(element["tags"])
+    old_tags = dict(element.get("tags", {}))
 
     new_tags = {**old_tags, **tags}
     for k in (remove or []):
@@ -531,6 +649,137 @@ def create_osm_way(
     osm_url = f"https://www.openstreetmap.org/way/{way_id}"
     return (
         f"Created way/{way_id} (changeset #{changeset_id})\n\n"
+        f"{preview}\n\n"
+        f"{osm_url}"
+    )
+
+
+@mcp.tool()
+def update_osm_relation_members(
+    relation_id: int,
+    remove: list[MemberMatch] | None = None,
+    set_roles: list[Member] | None = None,
+    add: list[MemberAdd] | None = None,
+    changeset_comment: str = "",
+    dry_run: bool = False,
+    ctx: Context = None,
+) -> str:
+    """Add, remove or change the role of members of an existing OSM relation.
+    Tags are left untouched (use update_osm_tags for those).
+
+    Operations are applied in order: remove, then set_roles, then add.
+    Show the user the diff (dry_run=True) and get explicit confirmation BEFORE uploading.
+
+    Args:
+        relation_id: Numeric OSM relation ID
+        remove: Members to remove, e.g. [{"type": "way", "ref": 123}]. If "role" is
+            given only members with that role are removed, otherwise every occurrence.
+        set_roles: New role for existing members, e.g. [{"type": "way", "ref": 123, "role": "inner"}]
+        add: Members to insert, e.g. [{"type": "way", "ref": 456, "role": "outer", "position": 0}].
+            "position" is 0-based on the list after removals; omit it to append.
+        changeset_comment: Short description of the change
+        dry_run: If True, compute and return the diff without uploading
+    """
+    element = _fetch_element("relation", relation_id)
+    new_members, changes = _apply_member_ops(
+        element.get("members", []), remove, set_roles, add
+    )
+    if not changes:
+        return "No changes — members are already up to date."
+
+    diff_output = "\n".join(
+        [f"relation/{relation_id}: {len(element.get('members', []))} -> {len(new_members)} members", ""]
+        + changes
+    )
+
+    if dry_run:
+        return f"DRY RUN — no upload.\n\n{diff_output}"
+
+    headers = _auth_headers(_token_from_context(ctx) if ctx else None)
+    comment = changeset_comment or f"Relation member update via {CREATED_BY}"
+    changeset_id = _create_changeset(comment, headers)
+
+    try:
+        xml_body = _build_element_xml(
+            element, element.get("tags", {}), changeset_id, members=new_members
+        )
+        req = Request(
+            f"{API_URL}/api/0.6/relation/{relation_id}",
+            data=xml_body.encode(),
+            headers={**headers, "Content-Type": "text/xml"},
+            method="PUT",
+        )
+        with urlopen(req) as r:
+            new_version = int(r.read().strip())
+    finally:
+        _close_changeset(changeset_id, headers)
+
+    osm_url = f"https://www.openstreetmap.org/relation/{relation_id}"
+    return (
+        f"Updated relation/{relation_id} to version {new_version} "
+        f"(changeset #{changeset_id})\n\n"
+        f"{diff_output}\n\n"
+        f"{osm_url}"
+    )
+
+
+@mcp.tool()
+def create_osm_relation(
+    members: list[Member],
+    tags: dict[str, str],
+    changeset_comment: str = "",
+    dry_run: bool = False,
+    ctx: Context = None,
+) -> str:
+    """Create a new OSM relation from existing elements.
+
+    Show the user members, roles and tags and get explicit confirmation BEFORE calling this tool.
+
+    Args:
+        members: Ordered members, e.g. [{"type": "way", "ref": 123, "role": "outer"}].
+            Every member must already exist on OSM.
+        tags: Tags for the relation; must include "type", e.g. {"type": "multipolygon", "landuse": "grass"}
+        changeset_comment: Short description of the change
+        dry_run: If True, return a preview and the XML without uploading
+    """
+    if not members:
+        raise ValueError("A relation needs at least one member")
+    if not tags.get("type"):
+        raise ValueError('A relation needs a "type" tag, e.g. type=multipolygon')
+
+    tag_lines = "\n".join(f"  {k} = {v}" for k, v in tags.items())
+    member_lines = "\n".join(
+        f"  [{i}] {_fmt_member(m.model_dump())}" for i, m in enumerate(members)
+    )
+    preview = (
+        f"New relation with {len(members)} members\n"
+        f"Members:\n{member_lines}\nTags:\n{tag_lines}"
+    )
+
+    if dry_run:
+        xml = _build_new_relation_xml(members, tags, changeset_id=0)
+        return f"DRY RUN — no upload.\n\n{preview}\n\nXML:\n{xml}"
+
+    headers = _auth_headers(_token_from_context(ctx) if ctx else None)
+    comment = changeset_comment or f"Add relation via {CREATED_BY}"
+    changeset_id = _create_changeset(comment, headers)
+
+    try:
+        xml_body = _build_new_relation_xml(members, tags, changeset_id)
+        req = Request(
+            f"{API_URL}/api/0.6/relation/create",
+            data=xml_body.encode(),
+            headers={**headers, "Content-Type": "text/xml"},
+            method="PUT",
+        )
+        with urlopen(req) as r:
+            relation_id = int(r.read().strip())
+    finally:
+        _close_changeset(changeset_id, headers)
+
+    osm_url = f"https://www.openstreetmap.org/relation/{relation_id}"
+    return (
+        f"Created relation/{relation_id} (changeset #{changeset_id})\n\n"
         f"{preview}\n\n"
         f"{osm_url}"
     )
