@@ -42,17 +42,17 @@ export OSM_TOKEN="<token>"
 
 ### 3. Register the MCP server in Claude Code
 
-**Option A — hosted (no local install needed):**
+**Option A - hosted (no local install needed):**
 
 ```bash
-claude mcp add --transport http osm https://osm-mcp.fastmcp.app/mcp \
+claude mcp add --transport http osm https://osm-mcp.alorenzi.eu/mcp \
   --header "X-API-Key: <your-osm-token>"
 ```
 
-The hosted server runs on [Prefect](https://horizon.prefect.io) and requires
-a Prefect account for the OAuth login that Claude Code will prompt.
+The hosted server stores no token: every client sends its own in the
+`X-API-Key` header, and edits are made with that account.
 
-**Option B — local:**
+**Option B - local:**
 
 ```bash
 claude mcp add osm -e OSM_TOKEN=<your-osm-token> -- \
